@@ -4,6 +4,11 @@
 
 *A containerized analytics solution for real-time asset monitoring and predictive maintenance of refrigerated fleets in Bangladesh.*
 
+### 🌐 Live Demo
+You can view the real-time dashboard here: 
+[**ColdChain-Guardian Live Dashboard**](https://coldchain-guardian.onrender.com)
+*(Note: As this is hosted on a free tier, it may take 30-60 seconds to wake up on the first load.)*
+
 ---
 
 ## 📸 Screenshots
