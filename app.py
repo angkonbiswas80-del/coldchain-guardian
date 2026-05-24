@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -6,6 +7,14 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import database_setup 
+
+
+if not os.path.exists("cold_chain_iot.db"):
+    print("Database file not found, initializing database...")
+    database_setup.init_db()
+else:
+    print("Database file found.")
 
 st.set_page_config(page_title="Controlant-Grade Fleet Analytics", layout="wide")
 
