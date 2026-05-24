@@ -1,31 +1,34 @@
 import os
-import streamlit as st
-import pandas as pd
+import threading
 import sqlite3
-import bcrypt
 import time
+import random
 import smtplib
+import bcrypt
+import pandas as pd
+import streamlit as st
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import database_setup
 
 # ----------------------------------------------------
-# DATABASE INIT - Always run on startup (Render fix)
+# DATABASE INIT
 # ----------------------------------------------------
 database_setup.init_db()
 
 st.set_page_config(page_title="Controlant-Grade Fleet Analytics", layout="wide")
 
 # ----------------------------------------------------
-# ENV CONFIG - Local .env / secrets.toml / Render env
+# ENV CONFIG - .env / secrets.toml / Render env vars
 # ----------------------------------------------------
 def get_env(key, fallback=None):
-    # 1st: os.environ (Render production)
+    # 1st: Render production env vars
     val = os.environ.get(key)
     if val:
         return val
 
-    # 2nd: secrets.toml (Streamlit Cloud / local)
+    # 2nd: Streamlit secrets.toml
     try:
         section_map = {
             "SENDER_EMAIL":   ("emails", "sender_email"),
@@ -38,7 +41,7 @@ def get_env(key, fallback=None):
     except Exception:
         pass
 
-    # 3rd: .env file (local fallback)
+    # 3rd: Local .env file fallback
     try:
         env_paths = [
             os.path.join(os.path.dirname(__file__), ".env"),
@@ -59,7 +62,83 @@ def get_env(key, fallback=None):
     return fallback
 
 # ----------------------------------------------------
-# PURE DATABASE AUTHENTICATION
+# BACKGROUND IOT SIMULATOR (Local + Render)
+# ----------------------------------------------------
+def run_simulator_background():
+    print("[INFO] Background fleet simulator started...")
+    counter = 0
+    dhaka_lat, dhaka_lon = 23.8103, 90.4125
+    ctg_lat,   ctg_lon   = 22.3569, 91.7832
+
+    while True:
+        counter += 1
+
+        # DEVICE 1: FREEZER_DHAKA_01 - Healthy
+        d1_temp    = round(random.uniform(3.2,  4.5),  2)
+        d1_vib     = round(random.uniform(16.0, 20.0), 2)
+        d1_current = round(random.uniform(1.2,  1.4),  2)
+        dhaka_lat += random.uniform(-0.001, 0.001)
+        dhaka_lon += random.uniform(-0.001, 0.001)
+
+        try:
+            conn = sqlite3.connect("cold_chain_iot.db", check_same_thread=False)
+            conn.execute("""
+                INSERT INTO telemetry_data
+                (device_id, temperature, vibration, current_draw, latitude, longitude, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("FREEZER_DHAKA_01", d1_temp, d1_vib, d1_current,
+                  dhaka_lat, dhaka_lon, "Healthy"))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[SIM DB ERROR] {e}")
+
+        # DEVICE 2: FREEZER_CTG_02 - Degradation Cycle
+        ctg_lat += random.uniform(-0.001, 0.001)
+        ctg_lon += random.uniform(-0.001, 0.001)
+
+        if counter < 10:
+            d2_temp    = round(random.uniform(4.0,  5.2),  2)
+            d2_vib     = round(random.uniform(18.0, 22.0), 2)
+            d2_current = round(random.uniform(1.3,  1.5),  2)
+            d2_status  = "Healthy"
+        elif counter < 20:
+            d2_temp    = round(random.uniform(6.2,  7.8),  2)
+            d2_vib     = round(random.uniform(35.0, 45.0), 2)
+            d2_current = round(random.uniform(2.0,  2.5),  2)
+            d2_status  = "Warning"
+        else:
+            d2_temp    = round(random.uniform(9.0,  12.5), 2)
+            d2_vib     = round(random.uniform(50.0, 65.0), 2)
+            d2_current = round(random.uniform(2.8,  3.4),  2)
+            d2_status  = "Critical"
+            if counter >= 25:
+                counter = 0
+
+        try:
+            conn = sqlite3.connect("cold_chain_iot.db", check_same_thread=False)
+            conn.execute("""
+                INSERT INTO telemetry_data
+                (device_id, temperature, vibration, current_draw, latitude, longitude, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("FREEZER_CTG_02", d2_temp, d2_vib, d2_current,
+                  ctg_lat, ctg_lon, d2_status))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[SIM DB ERROR] {e}")
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Fleet data pushed: DHAKA_01 & CTG_02")
+        time.sleep(3)
+
+# Simulator একবারই start হবে
+if 'simulator_started' not in st.session_state:
+    st.session_state['simulator_started'] = True
+    t = threading.Thread(target=run_simulator_background, daemon=True)
+    t.start()
+
+# ----------------------------------------------------
+# DATABASE AUTHENTICATION
 # ----------------------------------------------------
 def verify_login(username, password):
     try:
@@ -71,7 +150,6 @@ def verify_login(username, password):
         )
         row = cursor.fetchone()
         conn.close()
-
         if row:
             db_hash = row[0].encode('utf-8')
             if bcrypt.checkpw(password.encode('utf-8'), db_hash):
@@ -82,7 +160,7 @@ def verify_login(username, password):
         return False, None
 
 # ----------------------------------------------------
-# EMAIL ALERT - Works on Local + Render
+# EMAIL ALERT
 # ----------------------------------------------------
 def send_email_alert(device_id, temperature, vibration, status):
     try:
@@ -92,11 +170,10 @@ def send_email_alert(device_id, temperature, vibration, status):
 
         if not all([sender_email, app_password, receiver_email]):
             print("[EMAIL ERROR] Missing email configuration.")
-            st.toast("⚠️ Email config missing. Check env vars or secrets.toml.", icon="❌")
+            st.toast("⚠️ Email config missing.", icon="❌")
             return
 
         subject = f"🚨 CRITICAL BREACH ALERT: Asset {device_id}"
-
         body = f"""
         ⚠️ LOGISTICS COMPLIANCE ALERT - CRITICAL SYSTEM BREACH DETECTED
         ------------------------------------------------------------
@@ -131,12 +208,12 @@ def send_email_alert(device_id, temperature, vibration, status):
         st.toast(f"⚠️ Email dispatch failed: {e}", icon="❌")
 
 # ----------------------------------------------------
-# SESSION STATE INITIALIZATION
+# SESSION STATE
 # ----------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
     st.session_state['user_role'] = None
-    st.session_state['username'] = ""
+    st.session_state['username']  = ""
 
 if 'alert_fired_devices' not in st.session_state:
     st.session_state['alert_fired_devices'] = set()
@@ -149,16 +226,16 @@ if not st.session_state['logged_in']:
     st.subheader("Secure Logistics Management System")
 
     with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        username      = st.text_input("Username")
+        password      = st.text_input("Password", type="password")
         submit_button = st.form_submit_button("Access Dashboard")
 
         if submit_button:
             success, role = verify_login(username, password)
             if success:
-                st.session_state['logged_in'] = True
-                st.session_state['user_role'] = role
-                st.session_state['username'] = username
+                st.session_state['logged_in']  = True
+                st.session_state['user_role']  = role
+                st.session_state['username']   = username
                 st.success("Access Granted! Loading fleet manifest...")
                 time.sleep(1)
                 st.rerun()
@@ -167,12 +244,12 @@ if not st.session_state['logged_in']:
 
 else:
     # ----------------------------------------------------
-    # MAIN DASHBOARD (Post-Authentication)
+    # MAIN DASHBOARD
     # ----------------------------------------------------
     def load_available_devices():
         try:
             conn = sqlite3.connect("cold_chain_iot.db")
-            df = pd.read_sql_query(
+            df   = pd.read_sql_query(
                 "SELECT DISTINCT device_id FROM telemetry_data", conn
             )
             conn.close()
@@ -184,13 +261,12 @@ else:
     def load_device_data(selected_device):
         try:
             conn = sqlite3.connect("cold_chain_iot.db")
-            query = """
-                SELECT * FROM telemetry_data
-                WHERE device_id = ?
-                ORDER BY id DESC
-                LIMIT 50
-            """
-            df = pd.read_sql_query(query, conn, params=(selected_device,))
+            df   = pd.read_sql_query(
+                """SELECT * FROM telemetry_data
+                   WHERE device_id = ?
+                   ORDER BY id DESC LIMIT 50""",
+                conn, params=(selected_device,)
+            )
             conn.close()
             return df.iloc[::-1]
         except Exception as e:
@@ -206,7 +282,7 @@ else:
     if st.sidebar.button("Log Out"):
         st.session_state['logged_in'] = False
         st.session_state['user_role'] = None
-        st.session_state['username'] = ""
+        st.session_state['username']  = ""
         st.session_state['alert_fired_devices'].clear()
         st.rerun()
 
@@ -269,7 +345,8 @@ else:
                         )
                     else:
                         st.error(
-                            "🚨 CRITICAL BREACH: AUTOMATED EMAIL NOTIFICATION SENT TO MANAGEMENT TEAM!"
+                            "🚨 CRITICAL BREACH: AUTOMATED EMAIL NOTIFICATION "
+                            "SENT TO MANAGEMENT TEAM!"
                         )
 
                     # Charts
@@ -298,10 +375,10 @@ else:
                         ]].iloc[::-1]
 
                         try:
-                            excel_data = report_df.to_csv(index=False).encode('utf-8')
+                            csv_data = report_df.to_csv(index=False).encode('utf-8')
                             st.download_button(
                                 label="📥 Download Verified Compliance Log (CSV)",
-                                data=excel_data,
+                                data=csv_data,
                                 file_name=(
                                     f"Compliance_Report_{selected_device}"
                                     f"_{latest['timestamp']}.csv"
