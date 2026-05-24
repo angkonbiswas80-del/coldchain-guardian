@@ -163,6 +163,9 @@ else:
     devices = load_available_devices()
 
     if devices:
+        devices = sorted(devices, key=lambda x: (0 if "DHAKA" in x else 1, x))
+
+    if devices:
         selected_device = st.sidebar.selectbox("Select Active Asset Unit", devices)
     else:
         selected_device = None
@@ -242,7 +245,7 @@ else:
                                 data=excel_data,
                                 file_name=f"Compliance_Report_{selected_device}_{latest['timestamp']}.csv",
                                 mime="text/csv",
-                                use_container_width=True
+                                width='stretch'
                             )
                         except Exception as e:
                             st.error(f"Failed to generate spreadsheet manifest: {e}")
