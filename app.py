@@ -8,13 +8,19 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import database_setup 
+import threading
+from iot_simulator import run_simulator 
 
+
+threading.Thread(target=run_simulator, daemon=True).start()
 
 if not os.path.exists("cold_chain_iot.db"):
     print("Database file not found, initializing database...")
     database_setup.init_db()
 else:
     print("Database file found.")
+
+
 
 st.set_page_config(page_title="Controlant-Grade Fleet Analytics", layout="wide")
 
