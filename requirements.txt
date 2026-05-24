@@ -3,3 +3,4 @@ pandas
 bcrypt
 pytz
 requests
+streamlit_autorefresh
