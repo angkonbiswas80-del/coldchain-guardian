@@ -7,16 +7,56 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import database_setup 
+import database_setup
 
-# Database Initialization
-if not os.path.exists("cold_chain_iot.db"):
-    print("Database file not found, initializing database...")
-    database_setup.init_db()
-else:
-    print("Database file found.")
+# ----------------------------------------------------
+# DATABASE INIT - Always run on startup (Render fix)
+# ----------------------------------------------------
+database_setup.init_db()
 
 st.set_page_config(page_title="Controlant-Grade Fleet Analytics", layout="wide")
+
+# ----------------------------------------------------
+# ENV CONFIG - Local .env / secrets.toml / Render env
+# ----------------------------------------------------
+def get_env(key, fallback=None):
+    # 1st: os.environ (Render production)
+    val = os.environ.get(key)
+    if val:
+        return val
+
+    # 2nd: secrets.toml (Streamlit Cloud / local)
+    try:
+        section_map = {
+            "SENDER_EMAIL":   ("emails", "sender_email"),
+            "APP_PASSWORD":   ("emails", "app_password"),
+            "RECEIVER_EMAIL": ("emails", "receiver_email"),
+        }
+        if key in section_map:
+            section, skey = section_map[key]
+            return st.secrets[section][skey]
+    except Exception:
+        pass
+
+    # 3rd: .env file (local fallback)
+    try:
+        env_paths = [
+            os.path.join(os.path.dirname(__file__), ".env"),
+            os.path.join(os.path.dirname(__file__), "Render", ".env"),
+        ]
+        for env_path in env_paths:
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            if k.strip() == key:
+                                return v.strip()
+    except Exception:
+        pass
+
+    return fallback
 
 # ----------------------------------------------------
 # PURE DATABASE AUTHENTICATION
@@ -25,30 +65,34 @@ def verify_login(username, password):
     try:
         conn = sqlite3.connect("cold_chain_iot.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+        cursor.execute(
+            "SELECT password_hash, role FROM users WHERE username = ?",
+            (username,)
+        )
         row = cursor.fetchone()
         conn.close()
-        
+
         if row:
             db_hash = row[0].encode('utf-8')
             if bcrypt.checkpw(password.encode('utf-8'), db_hash):
                 return True, row[1]
         return False, None
-    except Exception:
+    except Exception as e:
+        print(f"[AUTH ERROR] {e}")
         return False, None
 
 # ----------------------------------------------------
-# REAL EMAIL ALERT (Optimized for Render)
+# EMAIL ALERT - Works on Local + Render
 # ----------------------------------------------------
 def send_email_alert(device_id, temperature, vibration, status):
     try:
-        # Fetch credentials from Environment Variables
-        sender_email   = os.environ.get("sender_email")
-        app_password   = os.environ.get("app_password")
-        receiver_email = os.environ.get("receiver_email")
+        sender_email   = get_env("SENDER_EMAIL")
+        app_password   = get_env("APP_PASSWORD")
+        receiver_email = get_env("RECEIVER_EMAIL")
 
-        if not sender_email or not app_password or not receiver_email:
-            print("[ERROR] Email credentials missing in environment variables.")
+        if not all([sender_email, app_password, receiver_email]):
+            print("[EMAIL ERROR] Missing email configuration.")
+            st.toast("⚠️ Email config missing. Check env vars or secrets.toml.", icon="❌")
             return
 
         subject = f"🚨 CRITICAL BREACH ALERT: Asset {device_id}"
@@ -83,7 +127,7 @@ def send_email_alert(device_id, temperature, vibration, status):
         print(f"[EMAIL SENT] Alert dispatched for {device_id}")
 
     except Exception as e:
-        print(f"[EMAIL ERROR] Failed to send alert: {e}")
+        print(f"[EMAIL ERROR] {e}")
         st.toast(f"⚠️ Email dispatch failed: {e}", icon="❌")
 
 # ----------------------------------------------------
@@ -98,7 +142,7 @@ if 'alert_fired_devices' not in st.session_state:
     st.session_state['alert_fired_devices'] = set()
 
 # ----------------------------------------------------
-# LOGIN INTERFACE
+# LOGIN UI
 # ----------------------------------------------------
 if not st.session_state['logged_in']:
     st.title("🔐 Enterprise Cold Chain Portal")
@@ -123,29 +167,39 @@ if not st.session_state['logged_in']:
 
 else:
     # ----------------------------------------------------
-    # DASHBOARD PANEL
+    # MAIN DASHBOARD (Post-Authentication)
     # ----------------------------------------------------
     def load_available_devices():
         try:
             conn = sqlite3.connect("cold_chain_iot.db")
-            df = pd.read_sql_query("SELECT DISTINCT device_id FROM telemetry_data", conn)
+            df = pd.read_sql_query(
+                "SELECT DISTINCT device_id FROM telemetry_data", conn
+            )
             conn.close()
             return df['device_id'].tolist()
-        except Exception:
+        except Exception as e:
+            print(f"[DB ERROR] {e}")
             return []
 
     def load_device_data(selected_device):
         try:
             conn = sqlite3.connect("cold_chain_iot.db")
-            query = f"SELECT * FROM telemetry_data WHERE device_id = '{selected_device}' ORDER BY id DESC LIMIT 50"
-            df = pd.read_sql_query(query, conn)
+            query = """
+                SELECT * FROM telemetry_data
+                WHERE device_id = ?
+                ORDER BY id DESC
+                LIMIT 50
+            """
+            df = pd.read_sql_query(query, conn, params=(selected_device,))
             conn.close()
             return df.iloc[::-1]
-        except Exception:
+        except Exception as e:
+            print(f"[DB ERROR] {e}")
             return pd.DataFrame()
 
     st.title("❄️ Enterprise Cold Chain - Multi-Asset & GPS Dashboard")
 
+    # Sidebar
     st.sidebar.markdown(f"**Current User:** `{st.session_state['username']}`")
     st.sidebar.markdown(f"**Role:** `{st.session_state['user_role']}`")
 
@@ -158,6 +212,7 @@ else:
 
     st.sidebar.write("---")
     st.sidebar.header("🚚 Global Fleet Management")
+
     devices = load_available_devices()
 
     if devices:
@@ -178,42 +233,84 @@ else:
                 # Anti-spam Alert Logic
                 if latest['status'] == "Critical":
                     if selected_device not in st.session_state['alert_fired_devices']:
-                        send_email_alert(latest['device_id'], latest['temperature'], latest['vibration'], latest['status'])
+                        send_email_alert(
+                            latest['device_id'],
+                            latest['temperature'],
+                            latest['vibration'],
+                            latest['status']
+                        )
                         st.session_state['alert_fired_devices'].add(selected_device)
-                        st.toast(f"🚨 Critical Alert! Email sent for {latest['device_id']}", icon="🔴")
+                        st.toast(
+                            f"🚨 Critical Alert! Email sent for {latest['device_id']}",
+                            icon="🔴"
+                        )
                 elif latest['status'] in ("Healthy", "Warning"):
                     if selected_device in st.session_state['alert_fired_devices']:
                         st.session_state['alert_fired_devices'].remove(selected_device)
 
                 with placeholder.container():
+                    # KPI Row
                     m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Active Asset Profile",          str(latest['device_id']))
-                    m2.metric("Core Compartment Temp",         f"{latest['temperature']} °C")
-                    m3.metric("Compressor Vibration Frequency",f"{latest['vibration']} Hz")
-                    m4.metric("Electrical Current Draw",       f"{latest['current_draw']} A")
+                    m1.metric("Active Asset Profile",           str(latest['device_id']))
+                    m2.metric("Core Compartment Temp",          f"{latest['temperature']} °C")
+                    m3.metric("Compressor Vibration Frequency", f"{latest['vibration']} Hz")
+                    m4.metric("Electrical Current Draw",        f"{latest['current_draw']} A")
 
+                    # Status Banner
                     if latest['status'] == "Healthy":
-                        st.success(f"✅ SYSTEM STATUS: NOMINAL OPERATION ({latest['device_id']} is running within safe parameter thresholds)")
+                        st.success(
+                            f"✅ SYSTEM STATUS: NOMINAL OPERATION "
+                            f"({latest['device_id']} running within safe thresholds)"
+                        )
                     elif latest['status'] == "Warning":
-                        st.warning("⚠️ PREDICTIVE ALERT: COMPRESSOR STRUCTURAL DEGRADATION DETECTED.")
+                        st.warning(
+                            "⚠️ PREDICTIVE ALERT: COMPRESSOR STRUCTURAL DEGRADATION DETECTED. "
+                            "Schedule physical audit within 48h."
+                        )
                     else:
-                        st.error("🚨 CRITICAL BREACH: AUTOMATED EMAIL NOTIFICATION SENT TO MANAGEMENT TEAM!")
+                        st.error(
+                            "🚨 CRITICAL BREACH: AUTOMATED EMAIL NOTIFICATION SENT TO MANAGEMENT TEAM!"
+                        )
 
+                    # Charts
                     c1, c2 = st.columns(2)
                     with c1:
                         st.subheader("Thermal Integrity Tracking Stream")
                         st.line_chart(df.set_index('timestamp')['temperature'])
-                        st.subheader("Real-time Active Fleet Location Link")
-                        st.map(df.rename(columns={'latitude': 'lat', 'longitude': 'lon'}), zoom=11)
+
+                        st.subheader("Real-time Active Fleet Location")
+                        map_df = df[['latitude', 'longitude']].rename(
+                            columns={'latitude': 'lat', 'longitude': 'lon'}
+                        )
+                        st.map(map_df, zoom=11)
 
                     with c2:
                         st.subheader("Mechanical System Stress Telemetry")
-                        st.line_chart(df.set_index('timestamp')[['vibration', 'current_draw']])
+                        st.line_chart(
+                            df.set_index('timestamp')[['vibration', 'current_draw']]
+                        )
+
                         st.subheader("Export Verified Compliance Records")
-                        
-                        report_df = df.iloc[::-1]
-                        csv_data = report_df.to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 Download Verified Compliance Log (CSV)", data=csv_data, file_name="report.csv", mime="text/csv", use_container_width=True)
+                        report_df = df[[
+                            'timestamp', 'device_id', 'temperature',
+                            'vibration', 'current_draw',
+                            'latitude', 'longitude', 'status'
+                        ]].iloc[::-1]
+
+                        try:
+                            excel_data = report_df.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label="📥 Download Verified Compliance Log (CSV)",
+                                data=excel_data,
+                                file_name=(
+                                    f"Compliance_Report_{selected_device}"
+                                    f"_{latest['timestamp']}.csv"
+                                ),
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                        except Exception as e:
+                            st.error(f"Failed to generate report: {e}")
 
                     st.subheader("Raw Ingestion Manifest Logs")
                     st.dataframe(report_df, use_container_width=True)
