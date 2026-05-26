@@ -2,19 +2,27 @@ import sqlite3
 import bcrypt
 
 def init_db():
-    db_name = "cold_chain_iot.db"
-    conn = sqlite3.connect(db_name)
+    # Connect with a generous timeout to prevent locking conflicts
+    conn = sqlite3.connect("cold_chain_iot.db", timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
-    # Drop old user table to clear mismatched schemas
-    cursor.execute("DROP TABLE IF EXISTS users")
+    # Create the authenticated users table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            role TEXT
+        )
+    """)
     
-    # 1. Telemetry Data Table
+    # Create the telemetry engine ingestion table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS telemetry_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            device_id TEXT,
             temperature REAL,
             vibration REAL,
             current_draw REAL,
@@ -24,25 +32,18 @@ def init_db():
         )
     """)
     
-    # 2. Secure User Authentication Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL
-        )
-    """)
-    
-    # 3. Insert Fresh Admin User with exact matching column (password_hash)
-    raw_password = "admin123"
-    hashed = bcrypt.hashpw(raw_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    
-    cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                   ("admin", hashed, "Logistics Manager"))
-    
-    conn.commit()
+    # Defensive check: Only insert the admin user if it does not already exist
+    cursor.execute("SELECT * FROM users WHERE username = ?", ("admin",))
+    if not cursor.fetchone():
+        hashed = bcrypt.hashpw("admin123".encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
+                       ("admin", hashed, "Logistics Manager"))
+        conn.commit()
+        print("[SUCCESS] Database schema initialized and default admin user created successfully!")
+    else:
+        print("[INFO] Database schema verified. Default admin profile already exists. Skipping insertion.")
+        
     conn.close()
-    print("[SUCCESS] Fresh Admin User Created with exact column mappings!")
 
 if __name__ == "__main__":
     init_db()
